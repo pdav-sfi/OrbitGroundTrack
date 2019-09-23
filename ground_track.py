@@ -18,12 +18,13 @@ import requests
 
 from skyfield.api import load, utc
 from skyfield.sgp4lib import EarthSatellite
+from sunposition import sunpos
 
 GLOBAL_CATALOG_NUMBER = {"G1": 43730, "G2": 43812, "G3": 44367, "G4": 44499}
 CELESTRAK_URL = "https://www.celestrak.com/NORAD/elements/active.txt"
 
 
-def create_ground_track(out_path, sat, tle=None, start=None, delta_min=1, num_steps=1440):
+def create_ground_track(out_path, sat, tle=None, start=None, delta_min=1, num_steps=1440, min_sun=None):
     """
     Compute the ground track for Globals and then write to GeoJSON
     """
@@ -45,6 +46,9 @@ def create_ground_track(out_path, sat, tle=None, start=None, delta_min=1, num_st
 
     track_list = correct_rollover(track)
 
+    if min_sun is not None:
+        track_list = filter_sun_elevation(track_list, times_dt, min_sun)
+
     properties = {"sat": sat, "start_time": str(times_dt[0]), "stop_time": str(times_dt[-1]), "time_step_minutes": delta_min}
 
     write_track_geojson(out_path, track_list, properties)
@@ -59,6 +63,36 @@ def write_track_geojson(out_path, track_list, properties):
 
     with open(out_path, "w") as fptr:
         json.dump(data, fptr)
+
+
+def filter_sun_elevation(lonlat_tracks, times, min_sun):
+    """
+    Remove all lon/lat points where the sun elevation is below min threshold. Tracks are broken up by orbit, but times
+    are a single list, so have to track index
+    """
+    tracks_out = []
+
+    idx = 0
+
+    for track in lonlat_tracks:
+        this_track = []
+        for lonlat in track:
+            t = times[idx]
+            idx +=1
+
+            sun_zen = sunpos(t, lonlat[1], lonlat[0], 0)[1]
+            sun_elev = 90 - sun_zen
+
+            if sun_elev >= min_sun:
+                this_track.append(lonlat)
+            elif len(this_track) > 0:
+                tracks_out.append(this_track)
+                this_track = []
+
+        if len(this_track) > 0:
+            tracks_out.append(this_track)
+
+    return tracks_out
 
 
 def correct_rollover(track):
@@ -149,6 +183,7 @@ def parse_args():
     p.add_argument("--start", default=None, help="Start time of groundtrack in format yyyy-mm-dd_hh-mm-ss, yyyymmddhhmmss, yyyy-mm-dd, or -yyyymmdd")
     p.add_argument("--step-size", default=1, type=float, help="Propagation time step size in minutes")
     p.add_argument("--step-num", default=1440, type=int, help="Number of propagation steps")
+    p.add_argument("--min-sun", default=None, type=float, help="Minimum sun angle for plotting pass")
 
     return p.parse_args()
 
@@ -161,4 +196,4 @@ if __name__ == "__main__":
     else:
         tle = [args.line1, args.line2]
 
-    create_ground_track(args.out_path, args.sat, tle, args.start, args.step_size, args.step_num)
+    create_ground_track(args.out_path, args.sat, tle, args.start, args.step_size, args.step_num, args.min_sun)
