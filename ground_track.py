@@ -6,6 +6,7 @@ against STK SGP4 propagator to < 1m.
 
 TO-DO:
 - include observable ground swath
+- add point at epoch
 """
 import datetime
 import json
@@ -56,8 +57,14 @@ def write_track_geojson(out_path, track_list, properties):
     """
     Write ground track to geojson
     """
+    # remove lists with only one lat/lon
+    track_list_prune = []
+    for track in track_list:
+        if len(track) > 1:
+            track_list_prune.append(track)
+
     data = {"type": "Feature", "properties": properties,
-            "geometry": {"type": "MultiLineString", "coordinates": track_list}}
+            "geometry": {"type": "MultiLineString", "coordinates": track_list_prune}}
 
     with open(out_path, "w") as fptr:
         json.dump(data, fptr)
@@ -164,8 +171,8 @@ def get_globals_tle(sat):
 
     # search for TLE by ID
     sat_id = GLOBAL_CATALOG_NUMBER[sat]
-    regex1 = re.compile("1 {:}.*".format(sat_id))
-    regex2 = re.compile("2 {:}.*".format(sat_id))
+    regex1 = re.compile("1 {:}.+".format(sat_id))
+    regex2 = re.compile("2 {:} .+".format(sat_id))
 
     line1 = regex1.search(data)[0]
     line2 = regex2.search(data)[0]
