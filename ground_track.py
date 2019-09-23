@@ -6,7 +6,6 @@ against STK SGP4 propagator to < 1m.
 
 TO-DO:
 - include observable ground swath
-- include sunlit constraint
 """
 import datetime
 import json
@@ -44,10 +43,9 @@ def create_ground_track(out_path, sat, tle=None, start=None, delta_min=1, num_st
 
     track = np.concatenate([lon.reshape(-1, 1), lat.reshape(-1, 1)], axis=1)
 
-    track_list = correct_rollover(track)
+    track_list = filter_sun_elevation(track, times_dt, min_sun)
 
-    if min_sun is not None:
-        track_list = filter_sun_elevation(track_list, times_dt, min_sun)
+    track_list = correct_rollover(track_list)
 
     properties = {"sat": sat, "start_time": str(times_dt[0]), "stop_time": str(times_dt[-1]), "time_step_minutes": delta_min}
 
@@ -65,59 +63,61 @@ def write_track_geojson(out_path, track_list, properties):
         json.dump(data, fptr)
 
 
-def filter_sun_elevation(lonlat_tracks, times, min_sun):
+def filter_sun_elevation(lonlat, times, min_sun):
     """
-    Remove all lon/lat points where the sun elevation is below min threshold. Tracks are broken up by orbit, but times
-    are a single list, so have to track index
+    Remove all lon/lat points where the sun elevation is below min threshold.
     """
-    tracks_out = []
+    if min_sun is None:
+        return [lonlat]
 
-    idx = 0
+    sun_zen = sunpos(times, lonlat[:,1], lonlat[:,0], 0)[:,1]
+    sun_elev = 90 - sun_zen
 
-    for track in lonlat_tracks:
-        this_track = []
-        for lonlat in track:
-            t = times[idx]
-            idx +=1
+    this_is_sun = sun_elev >= min_sun
+    last_is_sun = np.roll(this_is_sun, 1)
+    last_is_sun[0] = False
 
-            sun_zen = sunpos(t, lonlat[1], lonlat[0], 0)[1]
-            sun_elev = 90 - sun_zen
+    # get indices where we go from dark to light and light to dark
+    start_track = np.argwhere((~last_is_sun & this_is_sun)).reshape(-1)
+    end_track = np.argwhere((~this_is_sun & last_is_sun)).reshape(-1)
 
-            if sun_elev >= min_sun:
-                this_track.append(lonlat)
-            elif len(this_track) > 0:
-                tracks_out.append(this_track)
-                this_track = []
+    # if last point in track is in sun, then
+    if this_is_sun[-1]:
+        end_track = np.append(end_track, len(this_is_sun))
 
-        if len(this_track) > 0:
-            tracks_out.append(this_track)
+    lonlat_tracks = []
 
-    return tracks_out
+    for start, end in zip(start_track, end_track):
+        lonlat_tracks.append(lonlat[start:end, :])
+
+    return lonlat_tracks
 
 
-def correct_rollover(track):
+def correct_rollover(track_list):
     """
     Account for longitude rollover between +180/-180.
     Return list of tracks that each stay within [-180, +180], where is track is a nested list of lon/lat
     """
-    lon = track[:,0]
-    lon_sign = np.sign(lon)
+    track_list_out = []
 
-    lon_signchange = (np.roll(lon_sign, 1) - lon_sign) != 0
-    lon_signchange[0] = False
+    for track in track_list:
+        lon = track[:,0]
+        lon_sign = np.sign(lon)
 
-    lon_delta = np.abs(np.roll(lon, 1) - lon)
+        lon_signchange = (np.roll(lon_sign, 1) - lon_sign) != 0
+        lon_signchange[0] = False
 
-    rollover = (lon_delta > 90) & lon_signchange
-    rollover_ind = np.argwhere(rollover)
+        lon_delta = np.abs(np.roll(lon, 1) - lon)
 
-    track_list = []
-    prev_idx = 0
-    for idx in np.append(rollover_ind, track.shape[0]):
-        track_list.append(track[prev_idx:idx, :].tolist())
-        prev_idx = idx
+        rollover = (lon_delta > 180) & lon_signchange
+        rollover_ind = np.argwhere(rollover)
 
-    return track_list
+        prev_idx = 0
+        for idx in np.append(rollover_ind, track.shape[0]):
+            track_list_out.append(track[prev_idx:idx, :].tolist())
+            prev_idx = idx
+
+    return track_list_out
 
 
 def generate_time_array(start=None, delta_min=1, num_steps=1440):
