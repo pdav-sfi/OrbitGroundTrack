@@ -12,6 +12,7 @@ import datetime
 import json
 import re
 import argparse
+import os
 
 import numpy as np
 import requests
@@ -24,7 +25,7 @@ GLOBAL_CATALOG_NUMBER = {"G1": 43730, "G2": 43812, "G3": 44367, "G4": 44499}
 CELESTRAK_URL = "https://www.celestrak.com/NORAD/elements/active.txt"
 
 
-def create_ground_track(out_path, sat, tle=None, start=None, delta_min=1, num_steps=1440, min_sun=None):
+def create_ground_track(out_path, sat, tle=None, start=None, delta_min=1, num_steps=1440, min_sun=None, sensor_angle=None):
     """
     Compute the ground track for Globals and then write to GeoJSON
     """
@@ -52,19 +53,45 @@ def create_ground_track(out_path, sat, tle=None, start=None, delta_min=1, num_st
 
     write_track_geojson(out_path, track_list, properties)
 
+    if sensor_angle is not None:
+        swath_list = get_sensor_swath(track_list, sensor_angle)
+
+        swath_out_path = os.path.split(out_path)[0] + "_swath" + os.path.split(out_path)[1]
+        write_track_geojson(swath_out_path, swath_list, properties)
+
+
+def get_sensor_swath(track_list, sensor_angle):
+
+    swath_list = []
+
+    for track in track_list:
+        swath_list.extend(compute_swath(track, sensor_angle))
+
+    return swath_list
+
+
+def compute_swath(track, sensor_angle):
+    swath = []
+
+    bearing = get_track_bearing(track)
+
+    for idx, lonlat in enumerate(track):
+        bearing = None
+
+
+def get_track_bearing(track):
+
+    bearing_avg = []
+
+    
+
 
 def write_track_geojson(out_path, track_list, properties):
     """
     Write ground track to geojson
     """
-    # remove lists with only one lat/lon
-    track_list_prune = []
-    for track in track_list:
-        if len(track) > 1:
-            track_list_prune.append(track)
-
     data = {"type": "Feature", "properties": properties,
-            "geometry": {"type": "MultiLineString", "coordinates": track_list_prune}}
+            "geometry": {"type": "MultiLineString", "coordinates": track_list}}
 
     with open(out_path, "w") as fptr:
         json.dump(data, fptr)
@@ -123,7 +150,13 @@ def correct_rollover(track_list):
             track_list_out.append(track[prev_idx:idx, :].tolist())
             prev_idx = idx
 
-    return track_list_out
+    # remove lists with only one lat/lon
+    track_list_prune = []
+    for track in track_list_out:
+        if len(track) > 1:
+            track_list_prune.append(track)
+
+    return track_list_prune
 
 
 def generate_time_array(start=None, delta_min=1, num_steps=1440):
