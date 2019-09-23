@@ -18,7 +18,7 @@ import requests
 
 from skyfield.api import load, utc
 from skyfield.sgp4lib import EarthSatellite
-from sunposition import sunpos
+from pysolar.solar import get_altitude_fast as get_sun_elevation
 
 GLOBAL_CATALOG_NUMBER = {"G1": 43730, "G2": 43812, "G3": 44367, "G4": 44499}
 CELESTRAK_URL = "https://www.celestrak.com/NORAD/elements/active.txt"
@@ -77,8 +77,7 @@ def filter_sun_elevation(lonlat, times, min_sun):
     if min_sun is None:
         return [lonlat]
 
-    sun_zen = sunpos(times, lonlat[:,1], lonlat[:,0], 0)[:,1]
-    sun_elev = 90 - sun_zen
+    sun_elev = np.array([get_sun_elevation(lat, lon, time) for lat, lon, time in zip(lonlat[:,1], lonlat[:,0], times)])
 
     this_is_sun = sun_elev >= min_sun
     last_is_sun = np.roll(this_is_sun, 1)
