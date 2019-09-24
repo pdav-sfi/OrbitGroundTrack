@@ -5,7 +5,6 @@ Generate a GeoJSON of the Globals ground tracks for given interval from up-to-da
 against STK SGP4 propagator to < 1m.
 
 TO-DO:
-- include observable ground swath
 - add point at epoch
 """
 import datetime
@@ -13,6 +12,7 @@ import json
 import re
 import argparse
 import os
+import random
 
 import numpy as np
 import requests
@@ -20,14 +20,19 @@ import requests
 from skyfield.api import load, utc
 from skyfield.sgp4lib import EarthSatellite
 from pysolar.solar import get_altitude_fast as get_sun_elevation
+import pymap3d
 
-GLOBAL_CATALOG_NUMBER = {"G1": 43730, "G2": 43812, "G3": 44367, "G4": 44499}
+GLOBALS_CATALOG_NUMBER = {"G1": 43730, "G2": 43812, "G3": 44367, "G4": 44499}
+GLOBALS_ALTITUDE_KM = {"G1": 490, "G2": 590, "G3": 460, "G4": 550}
+EARTH_RAD_KM = 6371
+DEG2RAD = np.pi / 180.
+RAD2DEG = 180. / np.pi
 CELESTRAK_URL = "https://www.celestrak.com/NORAD/elements/active.txt"
 
 
-def create_ground_track(out_path, sat, tle=None, start=None, delta_min=1, num_steps=1440, min_sun=None, sensor_angle=None):
+def create_ground_track(out_path, sat, tle=None, start=None, delta_min=1, num_steps=1440, min_sun=None, sensor_angle=None, check_swath=False):
     """
-    Compute the ground track for Globals and then write to GeoJSON
+    Compute the ground track and sensor swatch for Globals and then write to GeoJSON
     """
     # get globals tles from Celestrak if TLE not passed in
     if tle is None:
@@ -54,36 +59,136 @@ def create_ground_track(out_path, sat, tle=None, start=None, delta_min=1, num_st
     write_track_geojson(out_path, track_list, properties)
 
     if sensor_angle is not None:
-        swath_list = get_sensor_swath(track_list, sensor_angle)
+        swath_list = get_sensor_swath(track_list, sensor_angle, GLOBALS_ALTITUDE_KM[sat])
 
-        swath_out_path = os.path.split(out_path)[0] + "_swath" + os.path.split(out_path)[1]
+        swath_out_path = os.path.splitext(out_path)[0] + "_swath" + os.path.splitext(out_path)[1]
         write_track_geojson(swath_out_path, swath_list, properties)
 
+    if check_swath:
+        swath_check_out_path = os.path.splitext(out_path)[0] + "_swath_test" + os.path.splitext(out_path)[1]
+        check_swath(swath_check_out_path, track_list, sensor_angle, 1000*GLOBALS_ALTITUDE_KM[sat])
 
-def get_sensor_swath(track_list, sensor_angle):
+
+def check_swath(out_path, track_list, sensor_angle, altitude_m):
+    """
+    Compute individual sensor cones by intersecting line of sight with Earth at random track points. Only use to check
+    that get_sensor_swath is working correctly
+    """
+    check_az = np.arange(0, 360, 5)
+
+    check_list = []
+
+    # pick 3 points from each path and check swath with pymap
+    for track in track_list:
+        for _ in range(3):
+            lonlat = random.choice(track)
+
+            check = []
+            for az in check_az:
+                lat, lon, _ = pymap3d.lookAtSpheroid(lonlat[1], lonlat[0], altitude_m, az, sensor_angle)
+                check.append([lon[()], lat[()]])
+
+            check_list.append(check)
+
+    write_track_geojson(out_path, check_list, {"test": "test"})
+
+
+
+def get_sensor_swath(track_list, sensor_angle, altitude):
+    """
+    Get a list of swath paths (list of lonlat pairs) for the sensor angle moving along each track at altitude
+    """
 
     swath_list = []
 
     for track in track_list:
-        swath_list.extend(compute_swath(track, sensor_angle))
+        bearings = get_track_bearings(track)
+
+        swaths = compute_swaths(track, bearings, sensor_angle, altitude)
+
+        swath_list.extend(swaths)
 
     return swath_list
 
 
-def compute_swath(track, sensor_angle):
-    swath = []
+def compute_swaths(track, bearings, sensor_angle, altitude):
+    """
+    Use the central angle computed from altitude and sensor angle to compute the lat/lon extent of the swath
+    """
+    central_angle = RAD2DEG * np.arcsin((EARTH_RAD_KM + altitude) / EARTH_RAD_KM * np.sin(DEG2RAD * sensor_angle)) - sensor_angle
 
-    bearing = get_track_bearing(track)
+    sin_central = np.sin(DEG2RAD * central_angle)
+    cos_central = np.cos(DEG2RAD * central_angle)
 
-    for idx, lonlat in enumerate(track):
-        bearing = None
+    lonlat_track = np.array(track)
+    heading1 = np.array(bearings) + 90
+    heading2 = np.array(bearings) - 90
+
+    sin_lat = np.sin(DEG2RAD * lonlat_track[:, 1])
+    cos_lat = np.cos(DEG2RAD * lonlat_track[:, 1])
+
+    sin_heading1 = np.sin(DEG2RAD * heading1)
+    cos_heading1 = np.cos(DEG2RAD * heading1)
+    sin_heading2 = np.sin(DEG2RAD * heading2)
+    cos_heading2 = np.cos(DEG2RAD * heading2)
+
+    swath1_lat = RAD2DEG * np.arcsin(sin_lat * cos_central + cos_lat * sin_central * cos_heading1)
+    swath2_lat = RAD2DEG * np.arcsin(sin_lat * cos_central + cos_lat * sin_central * cos_heading2)
+
+    swath1_lon = lonlat_track[:, 0] + RAD2DEG * np.arctan2(sin_heading1 * sin_central * cos_lat,
+                                                           cos_central - sin_lat * np.sin(DEG2RAD * swath1_lat))
+    swath2_lon = lonlat_track[:, 0] + RAD2DEG * np.arctan2(sin_heading2 * sin_central * cos_lat,
+                                                           cos_central - sin_lat * np.sin(DEG2RAD * swath2_lat))
+
+    swath1 = np.concatenate([swath1_lon.reshape(-1,1), swath1_lat.reshape(-1,1)], axis=1).tolist()
+    swath2 = np.concatenate([swath2_lon.reshape(-1, 1), swath2_lat.reshape(-1, 1)], axis=1).tolist()
+
+    return [swath1, swath2]
 
 
-def get_track_bearing(track):
+def get_track_bearings(track):
+    """
+    Get the average bearing at each point along the track, where average is the mean of incoming and outgoing segments
+    """
+    lonlat = np.array(track)
 
-    bearing_avg = []
+    # get the start and end points of each track segment
+    start_lonlat = lonlat[:-1,:]
+    end_lonlat = np.roll(lonlat, -1, axis=0)[:-1,:]
 
-    
+    segment_bearings = calc_bearings(start_lonlat, end_lonlat)
+
+    bearings_out = segment_bearings
+    bearings_in = np.roll(segment_bearings, 1)
+
+    # correct incoming for first element
+    bearings_in[0] = segment_bearings[0]
+
+    # add in/out for the last point in track
+    bearings_out = np.append(bearings_out, segment_bearings[-1])
+    bearings_in = np.append(bearings_in, segment_bearings[-1])
+
+    bearings_avg = (bearings_in + bearings_out) / 2
+
+    return bearings_avg.tolist()
+
+
+def calc_bearings(lonlat1, lonlat2):
+    """
+    Calculate the bearing from pt1 to pt2 at pt1. Each lonlat is Nx2
+    """
+    delta_lon = lonlat2[:,0] - lonlat1[:,0]
+
+    sin_lon = np.sin(DEG2RAD * delta_lon)
+    cos_lon = np.cos(DEG2RAD * delta_lon)
+
+    sin_lat1 = np.sin(DEG2RAD * lonlat1[:,1])
+    cos_lat1 = np.cos(DEG2RAD * lonlat1[:,1])
+
+    sin_lat2 = np.sin(DEG2RAD * lonlat2[:,1])
+    cos_lat2 = np.cos(DEG2RAD * lonlat2[:,1])
+
+    return RAD2DEG * np.arctan2(sin_lon * cos_lat2, cos_lat1 * sin_lat2 - sin_lat1 * cos_lat2 * cos_lon)
 
 
 def write_track_geojson(out_path, track_list, properties):
@@ -202,7 +307,7 @@ def get_globals_tle(sat):
     data = response.text
 
     # search for TLE by ID
-    sat_id = GLOBAL_CATALOG_NUMBER[sat]
+    sat_id = GLOBALS_CATALOG_NUMBER[sat]
     regex1 = re.compile("1 {:}.+".format(sat_id))
     regex2 = re.compile("2 {:} .+".format(sat_id))
 
@@ -223,6 +328,8 @@ def parse_args():
     p.add_argument("--step-size", default=1, type=float, help="Propagation time step size in minutes")
     p.add_argument("--step-num", default=1440, type=int, help="Number of propagation steps")
     p.add_argument("--min-sun", default=None, type=float, help="Minimum sun angle for plotting pass")
+    p.add_argument("--sensor-angle", default=None, type=float, help="Half angle of the sensor swath to show")
+    p.add_argument("--check-swath", action="store_true", help="Flag to generate GeoJSON to check swath width")
 
     return p.parse_args()
 
@@ -235,4 +342,5 @@ if __name__ == "__main__":
     else:
         tle = [args.line1, args.line2]
 
-    create_ground_track(args.out_path, args.sat, tle, args.start, args.step_size, args.step_num, args.min_sun)
+    create_ground_track(args.out_path, args.sat, tle, args.start, args.step_size, args.step_num, args.min_sun,
+                        args.sensor_angle, args.check_swath)
